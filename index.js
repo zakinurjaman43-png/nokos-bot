@@ -219,88 +219,6 @@ function getUser(chatId) {
     return users[id];
 }
 
-async function syncTelegramUserToSupabase(msg) {
-
-    try {
-
-        const telegramId =
-            String(msg?.from?.id || msg?.chat?.id || '');
-
-        if (!telegramId) {
-            return;
-        }
-
-        const username =
-            msg?.from?.username || null;
-
-        const firstName =
-            getTelegramName(msg);
-
-        const { data: existingUser, error: findError } =
-            await supabase
-                .from('users')
-                .select('id, balance')
-                .eq('telegram_id', telegramId)
-                .maybeSingle();
-
-        if (findError) {
-            console.log(
-                'SUPABASE USER CHECK ERROR:',
-                findError.message
-            );
-            return;
-        }
-
-        if (existingUser) {
-
-            const { error: updateError } =
-                await supabase
-                    .from('users')
-                    .update({
-                        username,
-                        first_name: firstName,
-                        is_active: true
-                    })
-                    .eq('id', existingUser.id);
-
-            if (updateError) {
-                console.log(
-                    'SUPABASE USER UPDATE ERROR:',
-                    updateError.message
-                );
-            }
-
-            return;
-        }
-
-        const { error: insertError } =
-            await supabase
-                .from('users')
-                .insert({
-                    telegram_id: telegramId,
-                    username,
-                    first_name: firstName,
-                    balance: 0,
-                    is_active: true
-                });
-
-        if (insertError) {
-            console.log(
-                'SUPABASE USER INSERT ERROR:',
-                insertError.message
-            );
-        }
-
-    } catch (error) {
-
-        console.log(
-            'SUPABASE USER SYNC ERROR:',
-            error.message
-        );
-
-    }
-}
-
 function updateTelegramUser(msg) {
 
     const users = loadUsers();
@@ -339,9 +257,6 @@ function updateTelegramUser(msg) {
     }
 
     saveUsers(users);
-
-    // Sinkronkan user ke Supabase tanpa mengubah alur bot Telegram.
-    syncTelegramUserToSupabase(msg).catch(() => {});
 
     return users[chatId];
 }
