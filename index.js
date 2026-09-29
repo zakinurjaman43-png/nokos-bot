@@ -4,13 +4,21 @@ const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const crypto = require('crypto');
 const midtransClient = require('midtrans-client');
+const { createClient } = require('@supabase/supabase-js');
+
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 // ==================================================
 // KONFIGURASI
 // ==================================================
 
 const SMSCODE_BASE_URL = 'https://api.smscode.gg/v1';
-const MARKUP_MINIMAL = 1000;
+
+const MARKUP_MINIMAL = 2000;
+const PEMBULATAN_HARGA = 500;
 
 const MIN_DEPOSIT = 15000;
 
@@ -269,9 +277,15 @@ function rupiah(angka) {
 
 function hitungHargaJual(hargaSupplier) {
 
-    return Number(hargaSupplier || 0) +
+    const harga =
+        Number(hargaSupplier || 0) +
         MARKUP_MINIMAL;
+
+    return Math.ceil(
+        harga / PEMBULATAN_HARGA
+    ) * PEMBULATAN_HARGA;
 }
+
 // ==================================================
 // API SMSCODE
 // ==================================================
