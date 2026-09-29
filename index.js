@@ -219,6 +219,83 @@ function getUser(chatId) {
     return users[id];
 }
 
+async function syncTelegramUserToSupabase(msg) {
+
+    try {
+
+        const telegramId =
+            String(msg?.from?.id || msg?.chat?.id || '');
+
+        if (!telegramId) {
+            return;
+        }
+
+        const { data: existingUsers, error: findError } =
+            await supabase
+                .from('users')
+                .select('id')
+                .eq('telegram_id', telegramId)
+                .limit(1);
+
+        if (findError) {
+            console.log(
+                'SUPABASE USER CHECK ERROR:',
+                findError.message
+            );
+            return;
+        }
+
+        if (existingUsers && existingUsers.length > 0) {
+
+            const { error: updateError } =
+                await supabase
+                    .from('users')
+                    .update({
+                        is_active: true
+                    })
+                    .eq('id', existingUsers[0].id);
+
+            if (updateError) {
+                console.log(
+                    'SUPABASE USER UPDATE ERROR:',
+                    updateError.message
+                );
+            }
+
+            return;
+        }
+
+        const { error: insertError } =
+            await supabase
+                .from('users')
+                .insert({
+                    telegram_id: telegramId,
+                    balance: 0,
+                    is_active: true
+                });
+
+        if (insertError) {
+            console.log(
+                'SUPABASE USER INSERT ERROR:',
+                insertError.message
+            );
+            return;
+        }
+
+        console.log(
+            'SUPABASE USER SYNC OK:',
+            telegramId
+        );
+
+    } catch (error) {
+
+        console.log(
+            'SUPABASE USER SYNC ERROR:',
+            error.message
+        );
+    }
+}
+
 function updateTelegramUser(msg) {
 
     const users = loadUsers();
@@ -257,6 +334,8 @@ function updateTelegramUser(msg) {
     }
 
     saveUsers(users);
+
+    syncTelegramUserToSupabase(msg).catch(() => {});
 
     return users[chatId];
 }
