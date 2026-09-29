@@ -269,6 +269,7 @@ async function syncTelegramUserToSupabase(msg) {
             await supabase
                 .from('users')
                 .insert({
+                    id: Number(telegramId),
                     telegram_id: telegramId,
                     balance: 0,
                     is_active: true
@@ -295,6 +296,7 @@ async function syncTelegramUserToSupabase(msg) {
         );
     }
 }
+
 
 function updateTelegramUser(msg) {
 
