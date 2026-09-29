@@ -10,9 +10,7 @@ const midtransClient = require('midtrans-client');
 // ==================================================
 
 const SMSCODE_BASE_URL = 'https://api.smscode.gg/v1';
-
-const MARKUP_MINIMAL = 2000;
-const PEMBULATAN_HARGA = 500;
+const MARKUP_MINIMAL = 1000;
 
 const MIN_DEPOSIT = 15000;
 
@@ -271,15 +269,9 @@ function rupiah(angka) {
 
 function hitungHargaJual(hargaSupplier) {
 
-    const harga =
-        Number(hargaSupplier || 0) +
+    return Number(hargaSupplier || 0) +
         MARKUP_MINIMAL;
-
-    return Math.ceil(
-        harga / PEMBULATAN_HARGA
-    ) * PEMBULATAN_HARGA;
 }
-
 // ==================================================
 // API SMSCODE
 // ==================================================
