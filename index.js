@@ -134,7 +134,87 @@ function saveUsers(users) {
         JSON.stringify(users, null, 2)
     );
 }
+// ==================================================
+// SUPABASE USER + ORDER
+// ==================================================
 
+async function syncUserToSupabase(user) {
+
+    if (!user || !user.id) {
+        return false;
+    }
+
+    const { error } = await supabase
+        .from('users')
+        .upsert(
+            {
+                id: Number(user.id),
+                telegram_id: String(user.id),
+                username: user.username || '-',
+                first_name: user.name || 'Pengguna Telegram',
+                balance: Number(user.balance || 0),
+                is_active: true
+            },
+            {
+                onConflict: 'telegram_id'
+            }
+        );
+
+    if (error) {
+        console.log(
+            'SUPABASE USER SYNC ERROR:',
+            error.message
+        );
+        return false;
+    }
+
+    return true;
+}
+
+async function simpanOrderSupabase(user, order) {
+
+    if (!user || !order) {
+        return false;
+    }
+
+    if (!await syncUserToSupabase(user)) {
+        return false;
+    }
+
+    const { error } = await supabase
+        .from('orders')
+        .insert({
+            user_id: Number(user.id),
+            telegram_id: String(user.id),
+            service_id: order.service_id != null
+                ? String(order.service_id)
+                : null,
+            country_id: order.country_id != null
+                ? String(order.country_id)
+                : null,
+            product_id: order.product_id != null
+                ? String(order.product_id)
+                : null,
+            phone_number: order.phone_number || null,
+            otp_code: order.otp_code || null,
+            supplier_order_id: order.supplier_order_id
+                ? String(order.supplier_order_id)
+                : null,
+            supplier_price: Number(order.supplier_price || 0),
+            price: Number(order.price || 0),
+            status: order.status || 'PENDING'
+        });
+
+    if (error) {
+        console.log(
+            'SUPABASE ORDER INSERT ERROR:',
+            error.message
+        );
+        return false;
+    }
+
+    return true;
+}
 // ==================================================
 // FORMAT TELEGRAM USER
 // ==================================================
@@ -1993,6 +2073,7 @@ bot.on(
                 currentUser.orders.push(
                     localOrder
                 );
+                await simpanOrderSupabase(currentUser, localOrder);
 
                 currentUser.history =
                     currentUser.history || [];
