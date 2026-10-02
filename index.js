@@ -88,6 +88,8 @@ const processingPurchases = new Set();
 
 const processingDeposits = new Set();
 
+const processingSettlements = new Set();
+
 // ==================================================
 // DATABASE
 // ==================================================
@@ -144,6 +146,9 @@ async function syncUserToSupabase(user) {
         return false;
     }
 
+    // Balance is intentionally not included here. Balance changes must always go
+    // through apply_balance_transaction so a profile sync cannot overwrite a
+    // newer balance that was updated by another bot process.
     const { error } = await supabase
         .from('users')
         .upsert(
@@ -152,7 +157,6 @@ async function syncUserToSupabase(user) {
                 telegram_id: String(user.id),
                 username: user.username || '-',
                 first_name: user.name || 'Pengguna Telegram',
-                balance: Number(user.balance || 0),
                 is_active: true
             },
             {
@@ -161,14 +165,43 @@ async function syncUserToSupabase(user) {
         );
 
     if (error) {
-        console.log(
-            'SUPABASE USER SYNC ERROR:',
-            error.message
-        );
+        console.log('SUPABASE USER SYNC ERROR:', error.message);
         return false;
     }
 
     return true;
+}
+
+async function catatTransaksiSaldo(user, amount, type, referenceId, metadata = {}) {
+
+    if (!user || !user.id || !Number.isFinite(Number(amount)) || !referenceId) {
+        throw new Error('Data transaksi saldo tidak valid.');
+    }
+
+    const { data, error } = await supabase.rpc('apply_balance_transaction', {
+        p_telegram_id: String(user.id),
+        p_username: user.username || '-',
+        p_first_name: user.name || 'Pengguna Telegram',
+        p_amount: Number(amount),
+        p_type: type,
+        p_reference_id: referenceId,
+        p_metadata: metadata
+    });
+
+    if (error) {
+        console.log('SUPABASE BALANCE TRANSACTION ERROR:', error.message);
+        throw new Error(error.message);
+    }
+
+    const result = Array.isArray(data) ? data[0] : data;
+    if (!result || !Number.isFinite(Number(result.balance))) {
+        throw new Error('Respons transaksi saldo Supabase tidak valid.');
+    }
+
+    return {
+        applied: Boolean(result.applied),
+        balance: Number(result.balance)
+    };
 }
 
 async function simpanOrderSupabase(user, order) {
@@ -591,11 +624,9 @@ async function ambilProdukById(
 // ==================================================
 
 async function buatOrderSupplier(
-    productId
+    productId,
+    idempotencyKey = crypto.randomUUID()
 ) {
-
-    const idempotencyKey =
-        crypto.randomUUID();
 
     const result =
         await apiRequest(
@@ -782,7 +813,8 @@ bot.on(
                 return;
             }
 
-            updateTelegramUser(msg);
+            const telegramUser = updateTelegramUser(msg);
+            await syncUserToSupabase(telegramUser);
 
             // ==========================================
             // BELI NOMOR
@@ -1745,7 +1777,7 @@ bot.on(
                 );
 
             const lockKey =
-                `${chatId}_${productId}`;
+                String(chatId);
 
             if (
                 processingPurchases.has(
@@ -1915,6 +1947,42 @@ bot.on(
                     return;
                 }
 
+                const purchaseReference =
+                    `purchase-${crypto.randomUUID()}`;
+
+                // Debit before requesting the supplier. Supabase serializes this
+                // check with the ledger insert, so concurrent purchases cannot
+                // spend the same balance twice.
+                let debit;
+                try {
+                    debit = await catatTransaksiSaldo(
+                        user,
+                        -hargaJual,
+                        'purchase',
+                        purchaseReference,
+                        {
+                            product_id: String(productId),
+                            country_id: String(countryId),
+                            service_id: String(serviceId),
+                            supplier_price: hargaSupplier
+                        }
+                    );
+                } catch (error) {
+                    await bot.sendMessage(
+                        chatId,
+                        '❌ *Saldo tidak cukup*\n\nSaldo lu mungkin baru dipakai di transaksi lain. Silakan cek saldo lalu coba lagi.',
+                        { parse_mode: 'Markdown' }
+                    );
+                    return;
+                }
+
+                const usersAfterDebit = loadUsers();
+                const userAfterDebit = usersAfterDebit[String(chatId)];
+                if (userAfterDebit) {
+                    userAfterDebit.balance = debit.balance;
+                    saveUsers(usersAfterDebit);
+                }
+
                 await bot.sendMessage(
                     chatId,
                     '⏳ Membuat order nomor...'
@@ -1924,35 +1992,42 @@ bot.on(
                 // ORDER KE SMSCODE
                 // ------------------------------------------
 
-                const orderResult =
-                    await buatOrderSupplier(
-                        productId
-                    );
+                const orderResult = await buatOrderSupplier(
+                    productId,
+                    purchaseReference
+                );
 
-                if (
-                    !orderResult ||
-                    !orderResult.success
-                ) {
+                if (!orderResult || !orderResult.success) {
+                    console.log('SMSCODE CREATE ORDER ERROR:', orderResult);
 
-                    console.log(
-                        'SMSCODE CREATE ORDER ERROR:',
-                        orderResult
-                    );
+                    // The supplier explicitly rejected the idempotent request,
+                    // so return the full amount using a separate idempotent
+                    // ledger entry. An ambiguous supplier response is not
+                    // refunded automatically.
+                    try {
+                        const refund = await catatTransaksiSaldo(
+                            user,
+                            hargaJual,
+                            'purchase_refund',
+                            `${purchaseReference}-refund`,
+                            { reason: 'supplier_rejected' }
+                        );
+                        const usersAfterRefund = loadUsers();
+                        const userAfterRefund = usersAfterRefund[String(chatId)];
+                        if (userAfterRefund) {
+                            userAfterRefund.balance = refund.balance;
+                            saveUsers(usersAfterRefund);
+                        }
+                    } catch (refundError) {
+                        console.log('SUPABASE PURCHASE REFUND ERROR:', refundError.message);
+                    }
 
                     await bot.sendMessage(
-
                         chatId,
-
                         '❌ *Gagal membuat order nomor.*\n\n' +
                         `${orderResult?.message || 'Supplier menolak order.'}`,
-
-                        {
-                            parse_mode:
-                                'Markdown'
-                        }
-
+                        { parse_mode: 'Markdown' }
                     );
-
                     return;
                 }
 
@@ -2007,28 +2082,8 @@ bot.on(
                     return;
                 }
 
-                if (
-                    Number(currentUser.balance) <
-                    hargaJual
-                ) {
-
-                    console.log(
-                        'CRITICAL: SALDO USER BERUBAH SETELAH ORDER',
-                        supplierOrder
-                    );
-
-                    await bot.sendMessage(
-                        chatId,
-                        '⚠️ Order berhasil dibuat tetapi saldo akun berubah. Hubungi admin.'
-                    );
-
-                    return;
-                }
-
-                // Potong saldo customer
-                currentUser.balance =
-                    Number(currentUser.balance) -
-                    hargaJual;
+                // The balance was already debited atomically in Supabase before
+                // the supplier request. Do not debit it again here.
 
                 const localOrder = {
 
@@ -2426,48 +2481,42 @@ bot.on(
                 );
 
             // Refund hanya sebesar refund supplier.
-            // Margin tidak ikut diberikan kembali.
-            if (
-                refundAmount > 0
-            ) {
-
-                const users =
-                    loadUsers();
-
-                const user =
-                    users[String(chatId)];
+            // Margin tidak ikut diberikan kembali. The ledger reference makes
+            // repeated cancel callbacks idempotent.
+            if (refundAmount > 0) {
+                const users = loadUsers();
+                const user = users[String(chatId)];
 
                 if (user) {
-
-                    user.balance =
-                        Number(user.balance || 0) +
-                        refundAmount;
-
-                    user.history =
-                        user.history || [];
-
-                    user.history.push({
-
-                        type:
-                            'Refund cancel order',
-
-                        amount:
+                    try {
+                        const refund = await catatTransaksiSaldo(
+                            user,
                             refundAmount,
-
-                        order_id:
-                            orderId,
-
-                        date:
-                            new Date().toLocaleString(
-                                'id-ID'
-                            )
-
-                    });
-
-                    saveUsers(users);
-
+                            'refund',
+                            `cancel-refund-${orderId}`,
+                            { supplier_order_id: String(orderId) }
+                        );
+                        user.balance = refund.balance;
+                        user.history = user.history || [];
+                        if (!user.history.some(item =>
+                            item.type === 'Refund cancel order' && item.order_id === orderId
+                        )) {
+                            user.history.push({
+                                type: 'Refund cancel order',
+                                amount: refundAmount,
+                                order_id: orderId,
+                                date: new Date().toLocaleString('id-ID')
+                            });
+                        }
+                        saveUsers(users);
+                    } catch (error) {
+                        console.log('SUPABASE CANCEL REFUND ERROR:', error.message);
+                        await bot.sendMessage(
+                            chatId,
+                            '⚠️ Refund dari supplier diterima, tetapi saldo sedang disinkronkan. Hubungi admin bila saldo belum bertambah.'
+                        );
+                    }
                 }
-
             }
 
             updateLocalOrder(
@@ -3018,7 +3067,7 @@ async function pollMidtransPayment(
 
                         clearInterval(timer);
 
-                        prosesDepositBerhasil(
+                        await prosesDepositBerhasil(
                             chatId,
                             orderId,
                             nominal
@@ -3123,99 +3172,76 @@ async function pollMidtransPayment(
 // DEPOSIT BERHASIL
 // ==================================================
 
-function prosesDepositBerhasil(
+async function prosesDepositBerhasil(
     chatId,
     orderId,
     nominal
 ) {
 
-    const users =
-        loadUsers();
-
-    const user =
-        users[String(chatId)];
-
-    if (!user) {
-
-        console.log(
-            'CRITICAL: USER TIDAK DITEMUKAN SAAT SETTLEMENT',
-            chatId,
-            orderId
-        );
-
+    if (processingSettlements.has(orderId)) {
         return;
     }
 
-    user.balance =
-        Number(user.balance || 0) +
-        Number(nominal);
+    processingSettlements.add(orderId);
 
-    user.deposits =
-        user.deposits || [];
+    try {
+        const users = loadUsers();
+        const user = users[String(chatId)];
 
-    const deposit =
-        user.deposits.find(
-            item =>
-                item.order_id ===
-                orderId
-        );
-
-    if (deposit) {
-
-        if (
-            deposit.status ===
-            'settlement'
-        ) {
-
+        if (!user) {
+            console.log('CRITICAL: USER TIDAK DITEMUKAN SAAT SETTLEMENT', chatId, orderId);
             return;
         }
 
-        deposit.status =
-            'settlement';
+        user.deposits = user.deposits || [];
+        const deposit = user.deposits.find(item => item.order_id === orderId);
 
-        deposit.paid_at =
-            new Date().toISOString();
-
-    }
-
-    user.history =
-        user.history || [];
-
-    user.history.push({
-
-        type:
-            'Deposit berhasil',
-
-        amount:
-            nominal,
-
-        order_id:
-            orderId,
-
-        date:
-            new Date().toLocaleString(
-                'id-ID'
-            )
-
-    });
-
-    saveUsers(users);
-
-    bot.sendMessage(
-
-        chatId,
-
-        '✅ *DEPOSIT BERHASIL*\n\n' +
-        `💰 Saldo masuk: Rp${rupiah(nominal)}\n` +
-        `💵 Saldo sekarang: Rp${rupiah(user.balance)}\n\n` +
-        'Sekarang lu sudah bisa membeli nomor.',
-
-        {
-            parse_mode:
-                'Markdown'
+        // A locally-settled deposit must never be credited a second time.
+        if (deposit?.status === 'settlement') {
+            return;
         }
 
-    );
+        const settlement = await catatTransaksiSaldo(
+            user,
+            Number(nominal),
+            'deposit',
+            orderId,
+            { payment_gateway: 'midtrans', order_id: orderId }
+        );
+
+        user.balance = settlement.balance;
+        if (deposit) {
+            deposit.status = 'settlement';
+            deposit.paid_at = new Date().toISOString();
+        }
+
+        user.history = user.history || [];
+        if (!user.history.some(item =>
+            item.type === 'Deposit berhasil' && item.order_id === orderId
+        )) {
+            user.history.push({
+                type: 'Deposit berhasil',
+                amount: nominal,
+                order_id: orderId,
+                date: new Date().toLocaleString('id-ID')
+            });
+        }
+
+        saveUsers(users);
+
+        await bot.sendMessage(
+            chatId,
+            '✅ *DEPOSIT BERHASIL*\n\n' +
+            `💰 Saldo masuk: Rp${rupiah(nominal)}\n` +
+            `💵 Saldo sekarang: Rp${rupiah(user.balance)}\n\n` +
+            'Sekarang lu sudah bisa membeli nomor.',
+            { parse_mode: 'Markdown' }
+        );
+    } catch (error) {
+        console.log('DEPOSIT SETTLEMENT ERROR:', error.message);
+    } finally {
+        processingSettlements.delete(orderId);
+    }
 
 }
 
