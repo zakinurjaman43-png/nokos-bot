@@ -17,7 +17,7 @@ const supabase = createClient(
 
 const SMSCODE_BASE_URL = 'https://api.smscode.gg/v1';
 
-const MARKUP_MINIMAL = 2000;
+const MARKUP_MINIMAL = 1000;
 const PEMBULATAN_HARGA = 500;
 
 const MIN_DEPOSIT = 15000;
